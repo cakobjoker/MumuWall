@@ -10,14 +10,14 @@
 
 // Define constants for the LED matrix
 #define PIN 21
-#define BRIGHTNESS 32      // Brightness of the LED matrix (out of 255)
+#define BRIGHTNESS 24      // Brightness of the LED matrix (out of 255)
 #define PANEL_WIDTH 16
 #define PANEL_HEIGHT 16
-#define PANELS_WIDE 2      // 5 panels wide
-#define PANELS_HIGH 2      // 8 panels high (5×8 = 40 total)
+#define PANELS_WIDE 3      // 5 panels wide
+#define PANELS_HIGH 3      // 8 panels high (5×8 = 40 total)
 #define NUM_LEDS (PANEL_WIDTH * PANEL_HEIGHT * PANELS_WIDE * PANELS_HIGH)
 
-#define MAX_PANELS 6
+#define MAX_PANELS 12
 #define DEBUG 0  // Disable serial debug output to avoid interfering with LMCSHD
 #define DEBUG_LED 2  // Onboard LED for visual feedback (GPIO 2 on most ESP32)
 
