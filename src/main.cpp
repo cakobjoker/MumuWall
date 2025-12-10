@@ -10,57 +10,59 @@
 
 // Define constants for the LED matrix
 #define PIN 21
-#define BRIGHTNESS 24      // Brightness of the LED matrix (out of 255)
-#define PANEL_WIDTH 16
-#define PANEL_HEIGHT 16
-#define PANELS_WIDE 3      // 5 panels wide
-#define PANELS_HIGH 3      // 8 panels high (5×8 = 40 total)
-#define NUM_LEDS (PANEL_WIDTH * PANEL_HEIGHT * PANELS_WIDE * PANELS_HIGH)
+#define BRIGHTNESS 36      // Brightness of the LED matrix (out of 255)
 
-#define MAX_PANELS 12
+// Individual matrix size (each 16×16 matrix module)
+#define MATRIX_WIDTH 16
+#define MATRIX_HEIGHT 16
+
+// Configuration: number of matrices in each direction
+#define MATRICES_WIDE 4     // 3 matrices wide
+#define MATRICES_HIGH 3     // 3 matrices high
+
+// Total panel dimensions (configuration width/height)
+#define PANEL_WIDTH (MATRIX_WIDTH * MATRICES_WIDE)    // 48
+#define PANEL_HEIGHT (MATRIX_HEIGHT * MATRICES_HIGH)  // 48
+
+// Total LEDs in this panel configuration
+#define NUM_LEDS (PANEL_WIDTH * PANEL_HEIGHT)
+
+// Number of microcontroller units (panels)
+#define NUM_PANELS 1  // Currently 1 microcontroller + matrix group
+
 #define DEBUG 0  // Disable serial debug output to avoid interfering with LMCSHD
 #define DEBUG_LED 2  // Onboard LED for visual feedback (GPIO 2 on most ESP32)
 
-// debug toggle: set to 1 to enable serial debug, 0 to disable
-//#define DEBUG 1
-
-// #define onboard 2
-
-static int width = PANEL_WIDTH * PANELS_WIDE;   // Total matrix width
-static int height = PANEL_HEIGHT * PANELS_HIGH; // Total matrix height
-int NUM_PANELS = (PANELS_WIDE * PANELS_HIGH); // Total number of panels (40)
+static int width = PANEL_WIDTH;      // Total matrix width
+static int height = PANEL_HEIGHT;    // Total matrix height
 bool dataReceived = false; // Track if we've received frame data
 
 // Streaming buffer for non-blocking reads
 uint8_t streamBuffer[NUM_LEDS * 3]; // Max 24BPP frame
 size_t streamPos = 0;
 size_t streamExpect = 0;
+int panelsToRead = 0;  // Track how many panels are being read
 
 // Array to hold the LED color data
 CRGB ledArray[NUM_LEDS];
 
 // Create a new NeoMatrix object
-FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(ledArray, 16, 16, 2, 2, 
-  NEO_MATRIX_TOP     + NEO_MATRIX_LEFT +
+FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(ledArray, MATRIX_WIDTH, MATRIX_HEIGHT, MATRICES_WIDE, MATRICES_HIGH, 
+  NEO_MATRIX_TOP     + NEO_MATRIX_RIGHT +
   NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG + 
-  NEO_TILE_BOTTOM + NEO_TILE_LEFT +  NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
+  NEO_TILE_TOP + NEO_TILE_LEFT +  NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
 
 // Arrays to hold the draw data and pass data
 uint16_t DrawData[NUM_LEDS]; 
-// Support up to 24BPP (3 bytes) for up to MAX_PANELS panels
-uint8_t PassData[NUM_LEDS * 3 * MAX_PANELS]; 
+uint8_t PassData[NUM_LEDS * 3]; // Single panel frame buffer
 uint8_t * RawData8 = NULL;
 uint16_t * RawData16 = NULL;
 uint8_t * RawData24 = NULL;
 
 // Forward declarations
-void DrawTheFrame8();
-void DrawTheFrame16();
-void DrawTheFrame24();
-void GetTheData8();
-void GetTheData16();
-void GetTheData24();
-void SerialEvent();
+void DrawTheFrame8FromBuffer(uint8_t* data);
+void DrawTheFrame16FromBuffer(uint16_t* data);
+void DrawTheFrame24FromBuffer(uint8_t* data);
 void handleCommand(uint8_t cmd);
 void processStreamFrame();
 
@@ -102,7 +104,7 @@ void setup() {
   FastLED.setBrightness(BRIGHTNESS);
   
   // Initialize serial communication
-  Serial.begin(115200);
+  Serial.begin(250000);
   Serial.setTimeout(0); // Non-blocking mode
 }
 
@@ -158,12 +160,10 @@ void handleCommand(uint8_t cmd) {
   case 0xC1:
   case 0xC2:
   case 0xC3:
+    // 16-bit multi-panel command (for future support)
     if (Serial.available()) {
-      uint8_t panelByte = Serial.read();
-      int requested = (panelByte == 0x0F) ? (PANELS_WIDE * PANELS_HIGH) : (panelByte & 0x0F);
-      if (requested == 0) requested = 1;
-      NUM_PANELS = (requested > MAX_PANELS) ? MAX_PANELS : requested;
-      streamExpect = (size_t)NUM_LEDS * NUM_PANELS * 2;
+      Serial.read(); // Consume panel byte (currently ignored)
+      streamExpect = (size_t)NUM_LEDS * 2;
       streamPos = 0;
     }
     break;
@@ -171,23 +171,19 @@ void handleCommand(uint8_t cmd) {
   case 0x81:
   case 0x82:
   case 0x83:
+    // 8-bit multi-panel command (for future support)
     if (Serial.available()) {
-      uint8_t panelByte = Serial.read();
-      int requested = (panelByte == 0x0F) ? (PANELS_WIDE * PANELS_HIGH) : (panelByte & 0x0F);
-      if (requested == 0) requested = 1;
-      NUM_PANELS = (requested > MAX_PANELS) ? MAX_PANELS : requested;
-      streamExpect = (size_t)NUM_LEDS * NUM_PANELS;
+      Serial.read(); // Consume panel byte (currently ignored)
+      streamExpect = (size_t)NUM_LEDS;
       streamPos = 0;
     }
     break;
 
   case 0xC4:
+    // 24-bit multi-panel command (for future support)
     if (Serial.available()) {
-      uint8_t panelByte = Serial.read();
-      int requested = (panelByte == 0x0F) ? (PANELS_WIDE * PANELS_HIGH) : (panelByte & 0x0F);
-      if (requested == 0) requested = 1;
-      NUM_PANELS = (requested > MAX_PANELS) ? MAX_PANELS : requested;
-      streamExpect = (size_t)NUM_LEDS * NUM_PANELS * 3;
+      Serial.read(); // Consume panel byte (currently ignored)
+      streamExpect = (size_t)NUM_LEDS * 3;
       streamPos = 0;
     }
     break;
@@ -208,114 +204,105 @@ void handleCommand(uint8_t cmd) {
 }
 
 void processStreamFrame() {
-  // Determine frame type based on streamExpect
   if (streamExpect == (size_t)NUM_LEDS * 2) {
-    // 16-bit RGB565
-    memcpy(PassData, streamBuffer, streamExpect);
-    DrawTheFrame16();
+    DrawTheFrame16FromBuffer((uint16_t*)streamBuffer);
   } else if (streamExpect == (size_t)NUM_LEDS) {
-    // 8-bit RGB332
-    memcpy(PassData, streamBuffer, streamExpect);
-    DrawTheFrame8();
+    DrawTheFrame8FromBuffer(streamBuffer);
   } else if (streamExpect == (size_t)NUM_LEDS * 3) {
-    // 24-bit RGB888
-    memcpy(PassData, streamBuffer, streamExpect);
-    DrawTheFrame24();
+    DrawTheFrame24FromBuffer(streamBuffer);
   }
   
-  Serial.write(0x06); // Send ack
+  Serial.write(0x06);
   dataReceived = true;
 }
 
 void GetTheData8(){
-  size_t expect = (size_t)NUM_LEDS * NUM_PANELS;
+  size_t expect = (size_t)NUM_LEDS;
   if (Serial.readBytes(PassData, expect) != (int)expect) {
-    // Timeout error: 3 quick pulses
     blinkLED(3, 80);
-    dataReceived = false; // Mark data as invalid
+    dataReceived = false;
     return;
   }
-  DrawTheFrame8(); 
+  DrawTheFrame8FromBuffer(PassData); 
   Serial.write(0x06); 
 }
 
 void GetTheData16(){
-  size_t expect = (size_t)NUM_LEDS * NUM_PANELS * 2;
+  size_t expect = (size_t)NUM_LEDS * 2;
   if (Serial.readBytes(PassData, expect) != (int)expect) {
     blinkLED(3, 80);
     dataReceived = false;
     return;
   }
-  DrawTheFrame16(); 
+  DrawTheFrame16FromBuffer((uint16_t*)PassData); 
   Serial.write(0x06); 
 }
 
 void GetTheData24(){
-  size_t expect = (size_t)NUM_LEDS * NUM_PANELS * 3;
+  size_t expect = (size_t)NUM_LEDS * 3;
   if (Serial.readBytes(PassData, expect) != (int)expect) {
     blinkLED(3, 80);
     dataReceived = false;
     return;
   }
-  DrawTheFrame24(); 
+  DrawTheFrame24FromBuffer(PassData); 
   Serial.write(0x06); 
 }
 
-void DrawTheFrame16(){
-  // Use the start of PassData (local panel data) instead of offset used for forwarding
-  RawData16 = (uint16_t *) &PassData[0];
-
-  // Convert each 16-bit RGB565 pixel into 8-bit RGB and write into ledArray
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint16_t pix = RawData16[i];
-    // swap endian if necessary (original code did swap)
-    pix = ((pix & 0xFF) << 8) | ((pix & 0xFF00) >> 8);
-    // Extract RGB565 components
-    uint8_t r5 = (pix >> 11) & 0x1F;
-    uint8_t g6 = (pix >> 5) & 0x3F;
-    uint8_t b5 = pix & 0x1F;
-    // Expand to 8-bit per channel
-    uint8_t r8 = (r5 << 3) | (r5 >> 2);
-    uint8_t g8 = (g6 << 2) | (g6 >> 4);
-    uint8_t b8 = (b5 << 3) | (b5 >> 2);
-    ledArray[i] = CRGB(r8, g8, b8);
+void DrawTheFrame16FromBuffer(uint16_t* data){
+  for (int y = 0; y < PANEL_HEIGHT; y++) {
+    int flippedY = PANEL_HEIGHT - 1 - y;
+    int srcRowOffset = flippedY * PANEL_WIDTH;
+    
+    for (int x = 0; x < PANEL_WIDTH; x++) {
+      uint16_t pix = data[srcRowOffset + x];
+      pix = ((pix & 0xFF) << 8) | ((pix & 0xFF00) >> 8);
+      
+      uint8_t r5 = (pix >> 11) & 0x1F;
+      uint8_t g6 = (pix >> 5) & 0x3F;
+      uint8_t b5 = pix & 0x1F;
+      
+      uint8_t r8 = (r5 << 3) | (r5 >> 2);
+      uint8_t g8 = (g6 << 2) | (g6 >> 4);
+      uint8_t b8 = (b5 << 3) | (b5 >> 2);
+      
+      ledArray[matrix->XY(x, y)] = CRGB(r8, g8, b8);
+    }
   }
-
-  // Show the LEDs
   FastLED.show();
 }
 
-void DrawTheFrame8(){
-  // Use the start of PassData (local panel data)
-  RawData8 = &PassData[0];
-  // Map the 8-bit color (RGB332-like) to 8-bit RGB and write into ledArray
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t v = RawData8[i];
-    uint8_t r3 = (v & 0xE0) >> 5;
-    uint8_t g3 = (v & 0x1C) >> 2;
-    uint8_t b2 = (v & 0x03);
-    // Expand to 8-bit (simple scaling)
-    uint8_t r8 = (r3 << 5) | (r3 << 2) | (r3 >> 1);
-    uint8_t g8 = (g3 << 5) | (g3 << 2) | (g3 >> 1);
-    uint8_t b8 = (b2 << 6) | (b2 << 4) | (b2 << 2) | b2;
-    ledArray[i] = CRGB(r8, g8, b8);
+void DrawTheFrame8FromBuffer(uint8_t* data){
+  for (int y = 0; y < PANEL_HEIGHT; y++) {
+    int flippedY = PANEL_HEIGHT - 1 - y;
+    int srcRowOffset = flippedY * PANEL_WIDTH;
+    
+    for (int x = 0; x < PANEL_WIDTH; x++) {
+      uint8_t v = data[srcRowOffset + x];
+      
+      uint8_t r3 = (v & 0xE0) >> 5;
+      uint8_t g3 = (v & 0x1C) >> 2;
+      uint8_t b2 = (v & 0x03);
+      
+      uint8_t r8 = (r3 << 5) | (r3 << 2) | (r3 >> 1);
+      uint8_t g8 = (g3 << 5) | (g3 << 2) | (g3 >> 1);
+      uint8_t b8 = (b2 << 6) | (b2 << 4) | (b2 << 2) | b2;
+      
+      ledArray[matrix->XY(x, y)] = CRGB(r8, g8, b8);
+    }
   }
-
-  // Show the LEDs
   FastLED.show();
 }
 
-void DrawTheFrame24(){
-  // Use the start of PassData (local panel data)
-  RawData24 = &PassData[0];
-  // Map the 24-bit color (RGB888) to ledArray
-  for (int i = 0; i < NUM_LEDS; i++) {
-    uint8_t r8 = RawData24[i * 3];
-    uint8_t g8 = RawData24[i * 3 + 1];
-    uint8_t b8 = RawData24[i * 3 + 2];
-    ledArray[i] = CRGB(r8, g8, b8);
+void DrawTheFrame24FromBuffer(uint8_t* data){
+  for (int y = 0; y < PANEL_HEIGHT; y++) {
+    int flippedY = PANEL_HEIGHT - 1 - y;
+    int srcRowOffset = (flippedY * PANEL_WIDTH) * 3;
+    
+    for (int x = 0; x < PANEL_WIDTH; x++) {
+      int srcIdx = srcRowOffset + (x * 3);
+      ledArray[matrix->XY(x, y)] = CRGB(data[srcIdx], data[srcIdx + 1], data[srcIdx + 2]);
+    }
   }
-
-  // Show the LEDs
   FastLED.show();
 }
