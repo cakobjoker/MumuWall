@@ -1,152 +1,168 @@
 #include <Arduino.h>
-
-// Include necessary libraries
 #include <Adafruit_GFX.h>
 #include <FastLED_NeoMatrix.h>
 #include <FastLED.h>
 #include <HardwareSerial.h>
-#include <SPIFFS.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
+// *** BOARD CONFIGURATION ***
+// Set to true for the first board (WiFi AP), false for UART-only boards
+#define WIFI_AP_MODE true
 
-// Define constants for the LED matrix
+// WiFi AP configuration
+#define AP_SSID "MumuWall_AP"
+#define AP_PASSWORD "mumuwall123"
+#define UDP_PORT 7777
+
+// Hardware configuration
 #define PIN 21
-#define BRIGHTNESS 32      // Brightness of the LED matrix (out of 255)
+#define BRIGHTNESS 24
+#define DEBUG_LED 2
 
-// Individual matrix size (each 16×16 matrix module)
+// Matrix configuration
 #define MATRIX_WIDTH 16
 #define MATRIX_HEIGHT 16
-
-// Configuration: number of matrices in each direction
-#define MATRICES_WIDE 3     // 3 matrices wide
-#define MATRICES_HIGH 3     // 3 matrices high
-
-// Total panel dimensions (configuration width/height)
+#define MATRICES_WIDE 3
+#define MATRICES_HIGH 3
 #define PANEL_WIDTH (MATRIX_WIDTH * MATRICES_WIDE)    // 48
 #define PANEL_HEIGHT (MATRIX_HEIGHT * MATRICES_HIGH)  // 48
-
-// Total LEDs in this panel configuration
 #define NUM_LEDS (PANEL_WIDTH * PANEL_HEIGHT)
 
-// Number of microcontroller units (panels)
-#define NUM_PANELS 1  // Currently 1 microcontroller + matrix group
+// Serial1 for forwarding to next panel group (UART_OUT)
+HardwareSerial Serial1(1);
 
-#define DEBUG 0  // Disable serial debug output to avoid interfering with LMCSHD
-#define DEBUG_LED 2  // Onboard LED for visual feedback (GPIO 2 on most ESP32)
+// WiFi UDP receiver (only used if WIFI_AP_MODE is true)
+WiFiUDP udp;
 
 static int width = PANEL_WIDTH;
 static int height = PANEL_HEIGHT;
 bool dataReceived = false;
 
-// Streaming buffer for non-blocking reads
-uint8_t streamBuffer[NUM_LEDS * 3];
+// Buffers
+uint8_t* streamBuffer = nullptr;
 size_t streamPos = 0;
 size_t streamExpect = 0;
+CRGB* ledArray = nullptr;
 
-// Pre-calculated XY to physical LED index mapping
-int16_t xyMap[PANEL_HEIGHT][PANEL_WIDTH];
-
-// Double buffer for zero-copy frame swaps
-CRGB ledArray[NUM_LEDS];
-CRGB swapArray[NUM_LEDS];
-CRGB* activeArray = ledArray;
-CRGB* inactiveArray = swapArray;
-portMUX_TYPE swapMutex = portMUX_INITIALIZER_UNLOCKED;
-volatile bool frameReady = false;  // Signal that frame is ready to display
-
-// Create a new NeoMatrix object (moved before initXYMap declaration)
-FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(ledArray, MATRIX_WIDTH, MATRIX_HEIGHT, MATRICES_WIDE, MATRICES_HIGH, 
-  NEO_MATRIX_TOP     + NEO_MATRIX_RIGHT +
-  NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG + 
-  NEO_TILE_TOP + NEO_TILE_LEFT +  NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
+// Matrix object
+FastLED_NeoMatrix *matrix = nullptr;
 
 // Forward declarations
 void DrawTheFrame8FromBuffer(uint8_t* data, CRGB* target);
 void DrawTheFrame16FromBuffer(uint16_t* data, CRGB* target);
 void handleCommand(uint8_t cmd);
 void processStreamFrame();
-void initXYMap();
-void refreshTask(void* pvParameters);
-
-// New helper: identify bytes that are protocol commands
-static inline bool isCommandByte(uint8_t b) {
-	// list of command header bytes used by the protocol
-	if (b == 0x05 || b == 0x42 || b == 0x43 || b == 0x44 || b == 0xFF) return true;
-	if (b >= 0xC0 && b <= 0xC4) return true; // 0xC1-0xC4 family
-	if (b >= 0x80 && b <= 0x83) return true; // 0x81-0x83 family
-	return false;
-}
-
-// Visual feedback helpers with longer pauses between patterns
-void blinkLED(int times, int delayMs = 100) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(DEBUG_LED, HIGH);
-    delay(delayMs);
-    digitalWrite(DEBUG_LED, LOW);
-    delay(delayMs);
-  }
-  delay(500); // Pause between blink patterns to distinguish them
-}
 
 void setup() {
   // Setup debug LED
   pinMode(DEBUG_LED, OUTPUT);
-  digitalWrite(DEBUG_LED, LOW);
+  digitalWrite(DEBUG_LED, HIGH);
   
-  // Quick startup blink without delay blocking
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(DEBUG_LED, HIGH);
-    delayMicroseconds(50000);
-    digitalWrite(DEBUG_LED, LOW);
-    delayMicroseconds(50000);
+  // Initialize Serial0 (UART_IN) - default pins GPIO43=TX, GPIO44=RX
+  Serial.begin(2000000);
+  Serial.setTimeout(0);
+  delay(500);
+  
+  Serial.println("\n=== ESP32-S3 LED Matrix Starting ===");
+  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+  
+  // Allocate LED buffer
+  Serial.println("Allocating LED array...");
+  ledArray = (CRGB*)malloc(NUM_LEDS * sizeof(CRGB));
+  if (ledArray == nullptr) {
+    Serial.println("ERROR: Failed to allocate LED array!");
+    while(1) { delay(1000); }
   }
+  memset(ledArray, 0, NUM_LEDS * sizeof(CRGB));
+  Serial.printf("LED array allocated. Free heap: %d bytes\n", ESP.getFreeHeap());
   
-  // Add LEDs to the FastLED library
+  // Allocate stream buffer
+  Serial.println("Allocating stream buffer...");
+  streamBuffer = (uint8_t*)malloc(NUM_LEDS * 3);
+  if (streamBuffer == nullptr) {
+    Serial.println("ERROR: Failed to allocate stream buffer!");
+    free(ledArray);
+    while(1) { delay(1000); }
+  }
+  Serial.printf("Stream buffer allocated. Free heap: %d bytes\n", ESP.getFreeHeap());
+  
+  // Initialize FastLED
+  Serial.println("Initializing FastLED...");
   FastLED.addLeds<WS2812B, PIN, GRB>(ledArray, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
+  FastLED.clear();
+  FastLED.show();
+  Serial.println("FastLED initialized");
   
-  // Pre-calculate XY mapping table
-  initXYMap();
+  // Create matrix object
+  Serial.println("Creating matrix...");
+  matrix = new FastLED_NeoMatrix(ledArray, MATRIX_WIDTH, MATRIX_HEIGHT, MATRICES_WIDE, MATRICES_HIGH, 
+    NEO_MATRIX_TOP + NEO_MATRIX_RIGHT + NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG + 
+    NEO_TILE_TOP + NEO_TILE_LEFT + NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
   
-  // Initialize serial communication at standard baud rate
-  // Official ESP32 UART speeds: 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
-  // However, 460800 and 921600 can be unreliable. Use 230400 as safe maximum.
-  Serial.begin(230400);
-  Serial.setTimeout(0); // Non-blocking mode
-  
-  // Create refresh task on core 0 (leaves core 1 for serial/main)
-  xTaskCreatePinnedToCore(
-    refreshTask,
-    "RefreshLEDs",
-    2048,
-    NULL,
-    1,
-    NULL,
-    0
-  );
-}
-
-// Background task that continuously refreshes LEDs
-void refreshTask(void* pvParameters) {
-  while (1) {
-    if (frameReady) {
-      // Only show when a new frame is ready
-      FastLED.show();
-      frameReady = false;
-    }
-    // Yield to prevent watchdog timeout
-    vTaskDelay(1);
+  if (matrix == nullptr) {
+    Serial.println("ERROR: Failed to create matrix!");
+    while(1) { delay(1000); }
   }
+  Serial.printf("Matrix created. Free heap: %d bytes\n", ESP.getFreeHeap());
+  
+  // Initialize Serial1 for forwarding to next panel group
+  // Using GPIO17=TX, GPIO18=RX (UART_OUT)
+  Serial1.begin(2000000, SERIAL_8N1, 18, 17);
+  Serial1.setTimeout(0);
+  Serial.println("Serial1 initialized for panel forwarding");
+  
+#if WIFI_AP_MODE
+  // Initialize WiFi Access Point
+  Serial.println("\n=== Configuring WiFi Access Point ===");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+  Serial.printf("SSID: %s\n", AP_SSID);
+  Serial.printf("Password: %s\n", AP_PASSWORD);
+  
+  // Start UDP server
+  udp.begin(UDP_PORT);
+  Serial.printf("UDP server started on port %d\n", UDP_PORT);
+  Serial.println("Ready to receive frames via WiFi");
+#else
+  Serial.println("\n*** UART-ONLY MODE - No WiFi AP ***");
+#endif
+  
+  Serial.println("\n=== Setup complete! Ready for data ===");
+  Serial.printf("Panel: %dx%d (%d LEDs)\n", PANEL_WIDTH, PANEL_HEIGHT, NUM_LEDS);
+#if WIFI_AP_MODE
+  Serial.printf("Mode: WiFi AP + UART Forwarding\n");
+  Serial.printf("WiFi: UDP @ port %d\n", UDP_PORT);
+#else
+  Serial.printf("Mode: UART Input Only\n");
+#endif
+  Serial.printf("UART_IN: Serial0 @ 2000000 baud (GPIO43/44)\n");
+  Serial.printf("UART_OUT: Serial1 @ 2000000 baud (GPIO17/18)\n");
+  digitalWrite(DEBUG_LED, LOW);
 }
 
-void initXYMap() {
-  for (int y = 0; y < PANEL_HEIGHT; y++) {
-    for (int x = 0; x < PANEL_WIDTH; x++) {
-      xyMap[y][x] = matrix->XY(x, y);
-    }
+void loop() {
+#if WIFI_AP_MODE
+  // Check for WiFi UDP packets
+  int packetSize = udp.parsePacket();
+  if (packetSize > 0) {
+    // Read UDP packet and forward to UART + process locally
+    uint8_t buffer[2048];
+    int len = udp.read(buffer, sizeof(buffer));
+    
+    // Forward all data to Serial1 (UART_OUT)
+    Serial1.write(buffer, len);
+    
+    // Also process locally by writing to Serial (which the code below will read)
+    Serial.write(buffer, len);
   }
-}
+#endif
 
-void loop(){
   // Non-blocking serial read loop
   while (Serial.available()) {
     if (streamExpect == 0) {
@@ -157,6 +173,9 @@ void loop(){
       // Reading frame data
       uint8_t byte = Serial.read();
       streamBuffer[streamPos++] = byte;
+      
+      // Forward frame data byte to next panel group
+      Serial1.write(byte);
       
       if (streamPos >= streamExpect) {
         // Frame complete
@@ -169,6 +188,9 @@ void loop(){
 }
 
 void handleCommand(uint8_t cmd) {
+  // Forward command to next panel group
+  Serial1.write(cmd);
+  
   switch (cmd) {
   case 0x05:
     Serial.print(width);
@@ -196,7 +218,7 @@ void handleCommand(uint8_t cmd) {
   case 0xC1:
   case 0xC2:
   case 0xC3:
-    // 16-bit multi-panel command (for future support)
+    // 16-bit multi-panel command
     if (Serial.available()) {
       Serial.read();
       streamExpect = (size_t)NUM_LEDS * 2;
@@ -207,7 +229,7 @@ void handleCommand(uint8_t cmd) {
   case 0x81:
   case 0x82:
   case 0x83:
-    // 8-bit multi-panel command (for future support)
+    // 8-bit multi-panel command
     if (Serial.available()) {
       Serial.read();
       streamExpect = (size_t)NUM_LEDS;
@@ -235,31 +257,25 @@ void handleCommand(uint8_t cmd) {
 }
 
 void processStreamFrame() {
-  // Write to inactive buffer
+  // Write directly to LED array
   if (streamExpect == (size_t)NUM_LEDS * 2) {
-    DrawTheFrame16FromBuffer((uint16_t*)streamBuffer, inactiveArray);
+    DrawTheFrame16FromBuffer((uint16_t*)streamBuffer, ledArray);
   } else if (streamExpect == (size_t)NUM_LEDS) {
-    DrawTheFrame8FromBuffer(streamBuffer, inactiveArray);
+    DrawTheFrame8FromBuffer(streamBuffer, ledArray);
   }
   
-  // Swap buffers atomically and signal refresh task
-  portENTER_CRITICAL(&swapMutex);
-  CRGB* temp = activeArray;
-  activeArray = inactiveArray;
-  inactiveArray = temp;
-  frameReady = true;
-  portEXIT_CRITICAL(&swapMutex);
+  // Show immediately
+  FastLED.show();
   
   Serial.write(0x06);
   dataReceived = true;
 }
 
-// Updated draw functions - write to target buffer instead of ledArray
+// Draw functions using matrix->XY() directly
 void DrawTheFrame16FromBuffer(uint16_t* data, CRGB* target){
   for (int y = 0; y < PANEL_HEIGHT; y++) {
     int flippedY = PANEL_HEIGHT - 1 - y;
     int srcRowOffset = flippedY * PANEL_WIDTH;
-    int16_t* rowMap = xyMap[y];
     
     for (int x = 0; x < PANEL_WIDTH; x++) {
       uint16_t pix = data[srcRowOffset + x];
@@ -269,7 +285,8 @@ void DrawTheFrame16FromBuffer(uint16_t* data, CRGB* target){
       uint8_t g6 = (pix >> 5) & 0x3F;
       uint8_t b5 = pix & 0x1F;
       
-      target[rowMap[x]] = CRGB((r5 << 3) | (r5 >> 2), 
+      int16_t ledIndex = matrix->XY(x, y);
+      target[ledIndex] = CRGB((r5 << 3) | (r5 >> 2), 
                                (g6 << 2) | (g6 >> 4), 
                                (b5 << 3) | (b5 >> 2));
     }
@@ -280,12 +297,12 @@ void DrawTheFrame8FromBuffer(uint8_t* data, CRGB* target){
   for (int y = 0; y < PANEL_HEIGHT; y++) {
     int flippedY = PANEL_HEIGHT - 1 - y;
     int srcRowOffset = flippedY * PANEL_WIDTH;
-    int16_t* rowMap = xyMap[y];
     
     for (int x = 0; x < PANEL_WIDTH; x++) {
       uint8_t v = data[srcRowOffset + x];
       
-      target[rowMap[x]] = CRGB((v & 0xE0) | ((v & 0xE0) >> 3),
+      int16_t ledIndex = matrix->XY(x, y);
+      target[ledIndex] = CRGB((v & 0xE0) | ((v & 0xE0) >> 3),
                                ((v & 0x1C) << 3) | ((v & 0x1C)),
                                ((v & 0x03) << 6) | ((v & 0x03) << 4) | ((v & 0x03) << 2) | (v & 0x03));
     }
