@@ -8,14 +8,32 @@ The end-goal with this project is to have a stage-sized, weather-resistant wall 
 
 **Hardware**
 * WS2812B LED matrix 16x16 
-1-10Pcs WS2812B RGB Flexible 16x16 8x32 256Leds Pixel Panel Matrix Screen Led Module WS2812 IC ECO Individually Addressable DC5V - AliExpress
 * Black tint
-https://www.aliexpress.com/item/1005006429348031.html?spm=a2g0o.cart.0.0.62d838dairhKjm&mp=1&pdp_npi=5%40dis%21NZD%21NZD%2032.06%21NZD%2029.48%21%21NZD%2029.48%21%21%21%40210328df17644696755042235eade8%2112000037136383712%21ct%21NZ%214170881165%21%211%210
 * DC Barrel Jacks
-5pcs 10pcs 5.5x2.1 mm Male Female Plug 12V DC Power Pigtail Cable Jack for CCTV Camera Connector Tail Extension 24V DC Wire - AliExpress
-* 3.5mm AUX Audio Cable
-3.5mm to 3.5mm AUX Audio Cable 3.5mm Jack Speaker Cable for JBL Headphones Car Samsung Xiaomi Redmi 5 Plus Oneplus MP3 AUX Cord - AliExpress 44
+* 3.5mm AUX Audio Cable for board to board communication
 * 5V 20A AC-DC Switching Power Supply
-110V 220V to 5V 12V 24V Universal AC DC Power Supply 1A 2A 3A 5A 6A 10A 20A Switching Power Supply SMPS Fonte Transformer
 * ESP32 Microcontroller
-* N-type Power gating MOSFETs
+* Custom cut clear acrylic panels 483x483mm
+
+**Dependencies**
+* Python
+* pyserial (pip install pyserial)
+* LMCSHD - https://github.com/TylerTimoJ/LMCSHD
+* COM0COM for virtual serial port
+
+**Steps to run**
+1. Connect to the AP ESP32 (only one has the code with AP flag enabled)
+2. Connect to the ESP32 WiFi AP
+    * Look for network MumuWall_AP
+    * Password: mumuwall123
+    * AP IP should be 192.168.4.1
+3. Start the bridge
+    ``` python serial_to_udp_bridge.py COM12 192.168.4.1 ```
+4. Configure LMCSHD programme to use COM11:
+    * Set port COM11
+    * Set baud rate: 2000000
+    * Configure width and height in pixels
+
+**Data Flow**
+```LMCSHD -> COM11 <--> COM12 -> Bridge script -> UDP -> ESP32 (192.168.4.1:7777) -> nESP32```
+(Where n is the number of ESPs in the chain)
