@@ -1,8 +1,8 @@
 **MumuWall** 
 
-This project aims to create a large modular display for use in stages in conjunction with other audio-visual equipment. It is made entirely of addressable WS2812B LEDs which can accept HDMI/DP input and function effectively as a monitor for live camera feeds or pre-recorded video. 
+This project aims to create a large modular display for use in stages in conjunction with other audio-visual equipment. It is made entirely of addressable WS2812B LEDs which can currently accept WiFi-serial or USB-serial input and function effectively as a monitor for live screen recorder feeds, GIFs, or drawing. 
 
-An LED ‘module’ will be standardised to 16x16cm squares to streamline the printing and assembly. For each group of 12 modules a 5V 20A switching power supply is to be used. 
+An LED ‘module’ will be standardised to 16x16cm squares to streamline the printing and assembly. For each group of 3x3 modules a 5V 20A switching power supply is to be used. 
 
 The end-goal with this project is to have a stage-sized, weather-resistant wall that can display visuals typically reserved for LCD/OLED displays which are restrictive in shape and modularity, cost prohibitive, and easily damaged.
 
