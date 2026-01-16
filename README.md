@@ -1,6 +1,6 @@
 **MumuWall** 
 
-This project aims to create a large modular display for use in stages in conjunction with other audio-visual equipment. It is made entirely of addressable WS2812B LEDs which can currently accept WiFi-serial or USB-serial input and function effectively as a monitor for live screen recorder feeds, GIFs, or drawing. 
+This project aims to create a large modular display for use in stages in conjunction with other audio-visual equipment. It is made entirely of addressable WS2812B LEDs which can currently accept USB-serial input and function effectively as a monitor for live screen recorder feeds, GIFs, or drawing. I have cloned this repository for WiFi-over-UDP functionality which requires com0com and a python script.
 
 An LED ‘module’ will be standardised to 16x16cm squares to streamline the printing and assembly. For each group of 3x3 modules a 5V 20A switching power supply is to be used. 
 
@@ -16,21 +16,12 @@ The end-goal with this project is to have a stage-sized, weather-resistant wall 
 * Custom cut clear acrylic panels 483x483mm
 
 **Dependencies**
-* Python
-* pyserial (pip install pyserial)
 * LMCSHD - https://github.com/TylerTimoJ/LMCSHD
-* COM0COM for virtual serial port
 
 **Steps to run**
-1. Connect to the AP ESP32 (only one has the code with AP flag enabled)
-2. Connect to the ESP32 WiFi AP
-    * Look for network MumuWall_AP
-    * Password: mumuwall123
-    * AP IP should be 192.168.4.1
-3. Start the bridge
-    ``` python serial_to_udp_bridge.py COM12 192.168.4.1 ```
-4. Configure LMCSHD programme to use COM11:
-    * Set port COM11
+1. Plug in USB-Serial TTL adapter from PC to board's UART_IN
+2. Launch LMCSHD programme:
+    * Set port to available COM
     * Set baud rate: 2000000
     * Configure width and height in pixels
 
