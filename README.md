@@ -26,5 +26,5 @@ The end-goal with this project is to have a stage-sized, weather-resistant wall 
     * Configure width and height in pixels
 
 **Data Flow**
-```LMCSHD -> COM11 <--> COM12 -> Bridge script -> UDP -> ESP32 (192.168.4.1:7777) -> nESP32```
+```LMCSHD -> COM port -> MCU1 UART_IN -> MCU1 UART_OUT -> MCU2 UART_IN```
 (Where n is the number of ESPs in the chain)
