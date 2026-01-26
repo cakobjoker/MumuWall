@@ -110,203 +110,119 @@ void setup() {
 }
 
 void GetTheData8(){
-  // Data arrives as full 96x48 frame in row-major order
-  Serial.print("CMD: 0x43 (8-bit), panels=");
-  Serial.print(NUM_PANELS);
-  Serial.print(", expect ");
-  Serial.print(TOTAL_WIDTH * TOTAL_HEIGHT);
-  Serial.println(" bytes (96x48 full frame)");
-  
-  // Always read the full 96x48 frame
+  // Always read the full frame
   uint16_t bytesToRead = TOTAL_WIDTH * TOTAL_HEIGHT;
   uart_in.readBytes(PassData, bytesToRead);  
-  Serial.print("✓ FRAME COMPLETE: received ");
-  Serial.print(bytesToRead);
-  Serial.println(" bytes");
   
   // Set up for drawing
   RawData8 = PassData;
   PanelIndex = 0;
   
   // Calculate board position in generic snake pattern for any grid size
-  // Position in sequence (0-indexed, converted from NUM_PANELS countdown)
   uint16_t position = (NUM_PANELS_WIDE * NUM_PANELS_HIGH) - NUM_PANELS;
-  
-  // Which column in the snake (0 = left, 1 = next, etc.)
   uint8_t snake_column = position / NUM_PANELS_HIGH;
-  
-  // Position within that column (0 = first in column)
   uint8_t position_in_column = position % NUM_PANELS_HIGH;
   
-  // Determine row: even columns go up (ascending), odd columns go down (descending)
-  uint8_t snake_row;
-  if (snake_column % 2 == 0) {
-    // Even column: start from bottom and go up
-    snake_row = NUM_PANELS_HIGH - 1 - position_in_column;
-  } else {
-    // Odd column: start from top and go down
-    snake_row = position_in_column;
-  }
+  // Determine row: even columns go up, odd columns go down
+  uint8_t snake_row = (snake_column % 2 == 0) ? 
+    (NUM_PANELS_HIGH - 1 - position_in_column) : position_in_column;
   
   // Convert grid position to pixel coordinates
   PanelDrawX = snake_column * PANEL_WIDTH;
   PanelDrawY = snake_row * PANEL_HEIGHT;
   
-  Serial.print("  Position=");
-  Serial.print(position);
-  Serial.print(", Col=");
-  Serial.print(snake_column);
-  Serial.print(", Row=");
-  Serial.print(snake_row);
-  Serial.print(" → Drawing at X=");
-  Serial.print(PanelDrawX);
-  Serial.print(", Y=");
-  Serial.println(PanelDrawY);
-  
-  // Forward entire frame to next board if we're first
+  // FORWARD FIRST - let next board start processing while we draw
   if (NUM_PANELS > 1) {
-    Serial.print("  → Forwarding ");
-    Serial.print(bytesToRead);
-    Serial.print(" bytes to next board with NUM_PANELS=");
-    Serial.println(NUM_PANELS - 1);
     Serial1.write(0x80 | (NUM_PANELS - 1));  // Header with decremented panel count
     Serial1.write(PassData, bytesToRead); 
   }
   
-  // Now we draw our frame
+  // Now draw our frame
   DrawTheFrame8(); 
-  // Send an acknowledgement
+  
+  // Send acknowledgement
   uart_in.write(0x06); 
 }
 
 void GetTheData16(){
-  // Data arrives as full 96x48 frame in row-major order
-  Serial.print("CMD: 0x42 (16-bit), panels=");
-  Serial.print(NUM_PANELS);
-  Serial.print(", expect ");
-  Serial.print(TOTAL_WIDTH * TOTAL_HEIGHT * 2);
-  Serial.println(" bytes (96x48 full frame, 16-bit)");
-  
-  // Always read the full 96x48 frame
+  // Always read the full frame
   uint16_t bytesToRead = TOTAL_WIDTH * TOTAL_HEIGHT * 2;
   uart_in.readBytes(PassData, bytesToRead);  
-  Serial.print("✓ FRAME COMPLETE: received ");
-  Serial.print(bytesToRead);
-  Serial.println(" bytes");
   
   // Set up for drawing
   RawData16 = (uint16_t *) PassData;
   PanelIndex = 0;
   
   // Calculate board position in generic snake pattern for any grid size
-  // Position in sequence (0-indexed, converted from NUM_PANELS countdown)
   uint16_t position = (NUM_PANELS_WIDE * NUM_PANELS_HIGH) - NUM_PANELS;
-  
-  // Which column in the snake (0 = left, 1 = next, etc.)
   uint8_t snake_column = position / NUM_PANELS_HIGH;
-  
-  // Position within that column (0 = first in column)
   uint8_t position_in_column = position % NUM_PANELS_HIGH;
   
-  // Determine row: even columns go up (ascending), odd columns go down (descending)
-  uint8_t snake_row;
-  if (snake_column % 2 == 0) {
-    // Even column: start from bottom and go up
-    snake_row = NUM_PANELS_HIGH - 1 - position_in_column;
-  } else {
-    // Odd column: start from top and go down
-    snake_row = position_in_column;
-  }
+  // Determine row: even columns go up, odd columns go down
+  uint8_t snake_row = (snake_column % 2 == 0) ? 
+    (NUM_PANELS_HIGH - 1 - position_in_column) : position_in_column;
   
   // Convert grid position to pixel coordinates
   PanelDrawX = snake_column * PANEL_WIDTH;
   PanelDrawY = snake_row * PANEL_HEIGHT;
   
-  Serial.print("  Position=");
-  Serial.print(position);
-  Serial.print(", Col=");
-  Serial.print(snake_column);
-  Serial.print(", Row=");
-  Serial.print(snake_row);
-  Serial.print(" → Drawing at X=");
-  Serial.print(PanelDrawX);
-  Serial.print(", Y=");
-  Serial.println(PanelDrawY);
-  
-  // Forward entire frame to next board if we're first
+  // FORWARD FIRST - let next board start processing while we draw
   if (NUM_PANELS > 1) {
-    Serial.print("  → Forwarding ");
-    Serial.print(bytesToRead);
-    Serial.print(" bytes to next board with NUM_PANELS=");
-    Serial.println(NUM_PANELS - 1);
     Serial1.write(0xC0 | (NUM_PANELS - 1));  // Header with decremented panel count
     Serial1.write(PassData, bytesToRead); 
   }
   
-  // Now we draw our frame
+  // Now draw our frame
   DrawTheFrame16(); 
-  // Send an acknowledgement
+  
+  // Send acknowledgement
   uart_in.write(0x06); 
 }
 
 void DrawTheFrame8(){
-  // Data arrives in row-major order for full 96x96 frame
+  // Data arrives in row-major order for full frame
   // Extract this board's 48x48 section based on PanelDrawX and PanelDrawY
   
-  uint16_t xOffset = PanelDrawX;  // 0 or 48
-  uint16_t yOffset = PanelDrawY;  // 0 or 48
+  uint16_t xOffset = PanelDrawX;
+  uint16_t yOffset = PanelDrawY;
   
   for (int y = 0; y < PANEL_HEIGHT; y++) {
     for (int x = 0; x < PANEL_WIDTH; x++) {
-      // Calculate index in the full-resolution row-major buffer
       int bufferIndex = (yOffset + y) * TOTAL_WIDTH + (xOffset + x);
-      
-      // Flip both X and Y for correct orientation
       int drawX = PANEL_WIDTH - 1 - x;
       int drawY = PANEL_HEIGHT - 1 - y;
       
-      // Map the 8-bit color to RGB 565
       uint8_t pixelData = RawData8[bufferIndex];
-      uint16_t color = ((pixelData & 0xE0) << 8)   // Red
-                     | ((pixelData & 0x1C) << 6)  // Green
-                     | ((pixelData & 0x03) << 3);  // Blue
+      uint16_t color = ((pixelData & 0xE0) << 8) | ((pixelData & 0x1C) << 6) | ((pixelData & 0x03) << 3);
       color |= (pixelData & 0x03) < 2 ? 0 : 4;
       
       matrix->drawPixel(drawX, drawY, color);
     }
   }
   
-  Serial.println("  → Calling FastLED.show()...");
   FastLED.show();
-  Serial.println("✓ Frame displayed!");
 }
 
 void DrawTheFrame16(){
-  // Data arrives in row-major order for full 96x96 frame
+  // Data arrives in row-major order for full frame
   // Extract this board's 48x48 section based on PanelDrawX and PanelDrawY
   
-  uint16_t xOffset = PanelDrawX;  // 0 or 48
-  uint16_t yOffset = PanelDrawY;  // 0 or 48
+  uint16_t xOffset = PanelDrawX;
+  uint16_t yOffset = PanelDrawY;
 
   for (int y = 0; y < PANEL_HEIGHT; y++) {
     for (int x = 0; x < PANEL_WIDTH; x++) {
-      // Calculate index in the full-resolution row-major buffer
       int bufferIndex = (yOffset + y) * TOTAL_WIDTH + (xOffset + x);
-      
-      // Flip both X and Y for correct orientation
       int drawX = PANEL_WIDTH - 1 - x;
       int drawY = PANEL_HEIGHT - 1 - y;
       
-      // Swap bytes for 16-bit color
       uint16_t color = ((RawData16[bufferIndex] & 0xFF) << 8) | ((RawData16[bufferIndex] & 0xFF00) >> 8);
       
       matrix->drawPixel(drawX, drawY, color);
     }
   }
   
-  Serial.println("  → Calling FastLED.show()...");
   FastLED.show();
-  Serial.println("✓ Frame displayed!");
 }
 
 void loop() {
