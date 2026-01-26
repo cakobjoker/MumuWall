@@ -1,392 +1,352 @@
-#include <Arduino.h>
+// Include necessary libraries
 #include <Adafruit_GFX.h>
 #include <FastLED_NeoMatrix.h>
 #include <FastLED.h>
 #include <HardwareSerial.h>
-#include <driver/gpio.h>
 
-// *** BOARD CONFIGURATION ***
-// UART-only mode - all boards read from UART_IN jack
+// Create HardwareSerial for UART0 (UART_IN jack on custom board)
+HardwareSerial uart_in(0);
 
-// Total display configuration (across all panels)
-#define TOTAL_WIDTH 96    // Total width across all panels
-#define TOTAL_HEIGHT 48   // Total height across all panels
+//--------------- Change as Needed ---------------------------------------
+// Define constants for the LED matrix
+#define PIN 21              // GPIO pin for WS2812B data line (ESP32-S3-mini-1)
+#define BRIGHTNESS 32      // Brightness of the LED matrix (out of 255)
 
-// Hardware configuration
-#define PIN 21 // GPIO21 for LED data 
-#define BRIGHTNESS 24  // Very low for testing - reduces power draw
-// #define DEBUG_LED 2
 
-// Matrix configuration
-#define MATRIX_WIDTH 16
-#define MATRIX_HEIGHT 16
-#define MATRICES_WIDE 3
-#define MATRICES_HIGH 3
-#define PANEL_WIDTH (MATRIX_WIDTH * MATRICES_WIDE)    // 48
-#define PANEL_HEIGHT (MATRIX_HEIGHT * MATRICES_HIGH)  // 48
-#define NUM_LEDS (PANEL_WIDTH * PANEL_HEIGHT)
+// Number of panels in the setup
+uint8_t NUM_PANELS = 4;
 
-// Serial1 for forwarding to next panel group (UART_OUT)
-// Using built-in Serial1 (no custom declaration needed)
+// Total display dimensions for calculating panel layout
+#define TOTAL_WIDTH 96       // Total width in pixels (48 per panel)
+#define TOTAL_HEIGHT 96      // Total height in pixels
+#define PANEL_WIDTH 48       // Width of one panel
+#define PANEL_HEIGHT 48      // Height of one panel
+#define NUM_MATRIX (PANEL_WIDTH*PANEL_HEIGHT)  // Total number of LEDs in one panel = 2304
+// Auto-calculated from dimensions
+#define NUM_PANELS_WIDE (TOTAL_WIDTH / PANEL_WIDTH)  // Panels horizontally
+#define NUM_PANELS_HIGH (TOTAL_HEIGHT / PANEL_HEIGHT) // Panels vertically
 
-static int width = PANEL_WIDTH;
-static int height = PANEL_HEIGHT;
-bool dataReceived = false;
+//--------------- Change as Needed ---------------------------------------
 
-// Multi-panel frame handling
-size_t totalFrameSize = 0;
-size_t myPanelOffset = 0;
-bool is16BitFrame = false;
-bool is24BitFrame = false;
-uint8_t numPanelsInFrame = 0;  // Number of panels in current multi-panel command
-uint8_t currentCommand = 0;     // Current command being processed
+// Array to hold the LED color data
+CRGB leds[NUM_MATRIX];
 
-// Buffers
-uint8_t* streamBuffer = nullptr;
-size_t streamPos = 0;
-size_t streamExpect = 0;
-CRGB* ledArray = nullptr;
+// Global tracking for panel positioning
+uint16_t PanelDrawX = 0;  // X position where this panel draws
+uint16_t PanelDrawY = 0;  // Y position where this panel draws
 
-// Timeout detection
-unsigned long lastFrameTime = 0;
-unsigned long frameCount = 0;
+// Create a new NeoMatrix object
+// 3x3 grid of 16x16 matrices = 48x48 pixels per panel
+FastLED_NeoMatrix *matrix = new FastLED_NeoMatrix(leds, 16, 16, 3, 3, 
+  NEO_MATRIX_TOP     + NEO_MATRIX_LEFT +
+  NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG + 
+  NEO_TILE_TOP + NEO_TILE_RIGHT +  NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
 
-// Matrix object
-FastLED_NeoMatrix *matrix = nullptr;
+// Arrays to hold the draw data and pass data
+uint16_t DrawData[NUM_MATRIX]; 
+uint8_t PassData[NUM_MATRIX * (2 * 2)]; // NUM_PANELS * 2
+uint8_t * RawData8 = NULL;
+uint16_t * RawData16 = NULL;
+uint16_t PanelIndex = 0;  // Track which panel this board should draw
 
-// Forward declarations
-void DrawTheFrame8FromBuffer(uint8_t* data, CRGB* target);
-void DrawTheFrame16FromBuffer(uint16_t* data, CRGB* target);
-void DrawTheFrame24FromBuffer(uint8_t* data, CRGB* target);
-void handleCommand(uint8_t cmd);
-void processStreamFrame();
-void processByte(uint8_t byte);
+// Forward declarations of functions
+void GetTheData8();
+void GetTheData16();
+void DrawTheFrame8();
+void DrawTheFrame16();
 
 void setup() {
-  // // Setup debug LED
-  // pinMode(DEBUG_LED, OUTPUT);
-  // digitalWrite(DEBUG_LED, HIGH);
-  
-  // Initialize Serial0 (UART_IN) - default pins RXD0=GPIO44, TXD0=GPIO43
+  // Initialize serial communication first for debugging
   Serial.begin(2000000);
-  Serial.setTimeout(0);
-  
-  // Allocate LED buffer
-  ledArray = (CRGB*)malloc(NUM_LEDS * sizeof(CRGB));
-  if (ledArray == nullptr) {
-    while(1) { delay(1000); }
-  }
-  memset(ledArray, 0, NUM_LEDS * sizeof(CRGB));
-  
-  // Allocate stream buffer for FULL frame (all panels)
-  size_t fullFrameBufferSize = (size_t)(TOTAL_WIDTH * TOTAL_HEIGHT * 3);
-  streamBuffer = (uint8_t*)malloc(fullFrameBufferSize);
-  if (streamBuffer == nullptr) {
-    free(ledArray);
-    while(1) { delay(1000); }
-  }
-  
-  // Initialize FastLED
-  FastLED.addLeds<WS2812B, PIN, GRB>(ledArray, NUM_LEDS);
-  FastLED.setBrightness(BRIGHTNESS);
-  FastLED.clear();
-  FastLED.show();
-  
-  // Create matrix object
-  matrix = new FastLED_NeoMatrix(ledArray, MATRIX_WIDTH, MATRIX_HEIGHT, MATRICES_WIDE, MATRICES_HIGH, 
-    NEO_MATRIX_TOP + NEO_MATRIX_RIGHT + NEO_MATRIX_COLUMNS + NEO_MATRIX_ZIGZAG + 
-    NEO_TILE_TOP + NEO_TILE_LEFT + NEO_TILE_COLUMNS + NEO_TILE_ZIGZAG);
-  
-  if (matrix == nullptr) {
-    while(1) { delay(1000); }
-  }
-  
-  // Initialize Serial1 for UART communication
-  // RX on GPIO44 (UART_IN tip = RXD0), TX on GPIO17 (UART_OUT tip)
-  Serial1.begin(2000000, SERIAL_8N1, 44, 17);  // RX=44(RXD0), TX=17
-  // Set GPIO17 (TX) to maximum drive strength for signal integrity
-  gpio_set_drive_capability((gpio_num_t)17, GPIO_DRIVE_CAP_3);
-  Serial1.setTimeout(0);
-  
-  // Final stabilization delay
   delay(500);
+  Serial.println("\n=== MumuWall ESP32-S3 Starting ===");
+  Serial.print("Panel size: ");
+  Serial.print(PANEL_WIDTH);
+  Serial.print("x");
+  Serial.println(PANEL_HEIGHT);
+  Serial.print("Total panels: ");
+  Serial.println(NUM_PANELS);
+  Serial.print("LED Pin: GPIO");
+  Serial.println(PIN);
   
-  // digitalWrite(DEBUG_LED, LOW);
+  // Add LEDs to the FastLED library
+  FastLED.addLeds<WS2812B, PIN, GRB>(leds, NUM_MATRIX);
+  FastLED.setBrightness(BRIGHTNESS);
+  
+  // Initialize the matrix
+  matrix->begin();
+  matrix->setBrightness(BRIGHTNESS);
+  
+  // Test pattern - fill with red to verify hardware
+  Serial.println("Running LED test pattern...");
+  for (int i = 0; i < NUM_MATRIX; i++) {
+    leds[i] = CRGB::Red;
+  }
+  FastLED.show();
+  Serial.println("LEDs should be RED now");
+  delay(2000);
+  
+  // Clear the matrix
+  for (int i = 0; i < NUM_MATRIX; i++) {
+    leds[i] = CRGB::Black;
+  }
+  FastLED.show();
+  Serial.println("LEDs should be OFF now");
+  
+  // Initialize Serial1 for UART_OUT (panel chaining - GPIO17/18)
+  Serial1.setPins(18, 17);  
+  Serial1.begin(2000000);
+  Serial.println("Serial1 initialized: RX=GPIO18, TX=GPIO17 @ 2Mbps (UART_OUT)");
+  
+  // Initialize uart_in for UART_IN (GPIO43/44 - hardware UART0)
+  // RX=GPIO43 (RXD0/Ring), TX=GPIO44 (TXD0/Tip)
+  // USB adapter: Tip=TX → Board RX, Ring=RX ← Board TX
+  // So swap: RX should be GPIO44, TX should be GPIO43
+  uart_in.begin(2000000, SERIAL_8N1, 44, 43);
+  Serial.println("UART_IN initialized: RX=GPIO44(Tip), TX=GPIO43(Ring) @ 2Mbps (UART_IN jack)");
+  
+  delay(500);
+  Serial.println("Setup complete! Waiting for UART data...");
+}
+
+void GetTheData8(){
+  // Data arrives as full 96x48 frame in row-major order
+  Serial.print("CMD: 0x43 (8-bit), panels=");
+  Serial.print(NUM_PANELS);
+  Serial.print(", expect ");
+  Serial.print(TOTAL_WIDTH * TOTAL_HEIGHT);
+  Serial.println(" bytes (96x48 full frame)");
+  
+  // Always read the full 96x48 frame
+  uint16_t bytesToRead = TOTAL_WIDTH * TOTAL_HEIGHT;
+  uart_in.readBytes(PassData, bytesToRead);  
+  Serial.print("✓ FRAME COMPLETE: received ");
+  Serial.print(bytesToRead);
+  Serial.println(" bytes");
+  
+  // Set up for drawing
+  RawData8 = PassData;
+  PanelIndex = 0;
+  
+  // Calculate board position in generic snake pattern for any grid size
+  // Position in sequence (0-indexed, converted from NUM_PANELS countdown)
+  uint16_t position = (NUM_PANELS_WIDE * NUM_PANELS_HIGH) - NUM_PANELS;
+  
+  // Which column in the snake (0 = left, 1 = next, etc.)
+  uint8_t snake_column = position / NUM_PANELS_HIGH;
+  
+  // Position within that column (0 = first in column)
+  uint8_t position_in_column = position % NUM_PANELS_HIGH;
+  
+  // Determine row: even columns go up (ascending), odd columns go down (descending)
+  uint8_t snake_row;
+  if (snake_column % 2 == 0) {
+    // Even column: start from bottom and go up
+    snake_row = NUM_PANELS_HIGH - 1 - position_in_column;
+  } else {
+    // Odd column: start from top and go down
+    snake_row = position_in_column;
+  }
+  
+  // Convert grid position to pixel coordinates
+  PanelDrawX = snake_column * PANEL_WIDTH;
+  PanelDrawY = snake_row * PANEL_HEIGHT;
+  
+  Serial.print("  Position=");
+  Serial.print(position);
+  Serial.print(", Col=");
+  Serial.print(snake_column);
+  Serial.print(", Row=");
+  Serial.print(snake_row);
+  Serial.print(" → Drawing at X=");
+  Serial.print(PanelDrawX);
+  Serial.print(", Y=");
+  Serial.println(PanelDrawY);
+  
+  // Forward entire frame to next board if we're first
+  if (NUM_PANELS > 1) {
+    Serial.print("  → Forwarding ");
+    Serial.print(bytesToRead);
+    Serial.print(" bytes to next board with NUM_PANELS=");
+    Serial.println(NUM_PANELS - 1);
+    Serial1.write(0x80 | (NUM_PANELS - 1));  // Header with decremented panel count
+    Serial1.write(PassData, bytesToRead); 
+  }
+  
+  // Now we draw our frame
+  DrawTheFrame8(); 
+  // Send an acknowledgement
+  uart_in.write(0x06); 
+}
+
+void GetTheData16(){
+  // Data arrives as full 96x48 frame in row-major order
+  Serial.print("CMD: 0x42 (16-bit), panels=");
+  Serial.print(NUM_PANELS);
+  Serial.print(", expect ");
+  Serial.print(TOTAL_WIDTH * TOTAL_HEIGHT * 2);
+  Serial.println(" bytes (96x48 full frame, 16-bit)");
+  
+  // Always read the full 96x48 frame
+  uint16_t bytesToRead = TOTAL_WIDTH * TOTAL_HEIGHT * 2;
+  uart_in.readBytes(PassData, bytesToRead);  
+  Serial.print("✓ FRAME COMPLETE: received ");
+  Serial.print(bytesToRead);
+  Serial.println(" bytes");
+  
+  // Set up for drawing
+  RawData16 = (uint16_t *) PassData;
+  PanelIndex = 0;
+  
+  // Calculate board position in generic snake pattern for any grid size
+  // Position in sequence (0-indexed, converted from NUM_PANELS countdown)
+  uint16_t position = (NUM_PANELS_WIDE * NUM_PANELS_HIGH) - NUM_PANELS;
+  
+  // Which column in the snake (0 = left, 1 = next, etc.)
+  uint8_t snake_column = position / NUM_PANELS_HIGH;
+  
+  // Position within that column (0 = first in column)
+  uint8_t position_in_column = position % NUM_PANELS_HIGH;
+  
+  // Determine row: even columns go up (ascending), odd columns go down (descending)
+  uint8_t snake_row;
+  if (snake_column % 2 == 0) {
+    // Even column: start from bottom and go up
+    snake_row = NUM_PANELS_HIGH - 1 - position_in_column;
+  } else {
+    // Odd column: start from top and go down
+    snake_row = position_in_column;
+  }
+  
+  // Convert grid position to pixel coordinates
+  PanelDrawX = snake_column * PANEL_WIDTH;
+  PanelDrawY = snake_row * PANEL_HEIGHT;
+  
+  Serial.print("  Position=");
+  Serial.print(position);
+  Serial.print(", Col=");
+  Serial.print(snake_column);
+  Serial.print(", Row=");
+  Serial.print(snake_row);
+  Serial.print(" → Drawing at X=");
+  Serial.print(PanelDrawX);
+  Serial.print(", Y=");
+  Serial.println(PanelDrawY);
+  
+  // Forward entire frame to next board if we're first
+  if (NUM_PANELS > 1) {
+    Serial.print("  → Forwarding ");
+    Serial.print(bytesToRead);
+    Serial.print(" bytes to next board with NUM_PANELS=");
+    Serial.println(NUM_PANELS - 1);
+    Serial1.write(0xC0 | (NUM_PANELS - 1));  // Header with decremented panel count
+    Serial1.write(PassData, bytesToRead); 
+  }
+  
+  // Now we draw our frame
+  DrawTheFrame16(); 
+  // Send an acknowledgement
+  uart_in.write(0x06); 
+}
+
+void DrawTheFrame8(){
+  // Data arrives in row-major order for full 96x96 frame
+  // Extract this board's 48x48 section based on PanelDrawX and PanelDrawY
+  
+  uint16_t xOffset = PanelDrawX;  // 0 or 48
+  uint16_t yOffset = PanelDrawY;  // 0 or 48
+  
+  for (int y = 0; y < PANEL_HEIGHT; y++) {
+    for (int x = 0; x < PANEL_WIDTH; x++) {
+      // Calculate index in the full-resolution row-major buffer
+      int bufferIndex = (yOffset + y) * TOTAL_WIDTH + (xOffset + x);
+      
+      // Flip both X and Y for correct orientation
+      int drawX = PANEL_WIDTH - 1 - x;
+      int drawY = PANEL_HEIGHT - 1 - y;
+      
+      // Map the 8-bit color to RGB 565
+      uint8_t pixelData = RawData8[bufferIndex];
+      uint16_t color = ((pixelData & 0xE0) << 8)   // Red
+                     | ((pixelData & 0x1C) << 6)  // Green
+                     | ((pixelData & 0x03) << 3);  // Blue
+      color |= (pixelData & 0x03) < 2 ? 0 : 4;
+      
+      matrix->drawPixel(drawX, drawY, color);
+    }
+  }
+  
+  Serial.println("  → Calling FastLED.show()...");
+  FastLED.show();
+  Serial.println("✓ Frame displayed!");
+}
+
+void DrawTheFrame16(){
+  // Data arrives in row-major order for full 96x96 frame
+  // Extract this board's 48x48 section based on PanelDrawX and PanelDrawY
+  
+  uint16_t xOffset = PanelDrawX;  // 0 or 48
+  uint16_t yOffset = PanelDrawY;  // 0 or 48
+
+  for (int y = 0; y < PANEL_HEIGHT; y++) {
+    for (int x = 0; x < PANEL_WIDTH; x++) {
+      // Calculate index in the full-resolution row-major buffer
+      int bufferIndex = (yOffset + y) * TOTAL_WIDTH + (xOffset + x);
+      
+      // Flip both X and Y for correct orientation
+      int drawX = PANEL_WIDTH - 1 - x;
+      int drawY = PANEL_HEIGHT - 1 - y;
+      
+      // Swap bytes for 16-bit color
+      uint16_t color = ((RawData16[bufferIndex] & 0xFF) << 8) | ((RawData16[bufferIndex] & 0xFF00) >> 8);
+      
+      matrix->drawPixel(drawX, drawY, color);
+    }
+  }
+  
+  Serial.println("  → Calling FastLED.show()...");
+  FastLED.show();
+  Serial.println("✓ Frame displayed!");
 }
 
 void loop() {
-  // Timeout detection - reset if stuck waiting for data
-  if (streamExpect > 0 && (millis() - lastFrameTime > 5000)) {
-    streamPos = 0;
-    streamExpect = 0;
-    lastFrameTime = millis();
-  }
-  
-  // UART-only mode: Read from Serial1 (UART_IN jack from previous board)
-  if (Serial1.available()) {
-    // Process all available bytes
-    while (Serial1.available()) {
-      uint8_t byte = Serial1.read();
-      processByte(byte);
-    }
-  }
-}
-
-void handleCommand(uint8_t cmd) {
-  switch (cmd) {
-  case 0x05:
-    // Report total display size - ONLY Panel 0 responds
-    // UART-only panels don't respond to dimension queries
-    break;
-  
-  case 0x42:
-    // Legacy 16-bit frame from LMCSHD - auto-calculate panel count
-    numPanelsInFrame = (TOTAL_WIDTH / PANEL_WIDTH) * (TOTAL_HEIGHT / PANEL_HEIGHT);
-    currentCommand = 0xC0 | numPanelsInFrame;
-    totalFrameSize = (size_t)(TOTAL_WIDTH * TOTAL_HEIGHT);
-    streamExpect = totalFrameSize * 2;
-    streamPos = 0;
-    is16BitFrame = true;
-    lastFrameTime = millis();
-    break;
-  
-  case 0x43:
-    // Legacy 8-bit frame from LMCSHD - auto-calculate panel count
-    numPanelsInFrame = (TOTAL_WIDTH / PANEL_WIDTH) * (TOTAL_HEIGHT / PANEL_HEIGHT);
-    currentCommand = 0x80 | numPanelsInFrame;
-    totalFrameSize = (size_t)(TOTAL_WIDTH * TOTAL_HEIGHT);
-    streamExpect = totalFrameSize;
-    streamPos = 0;
-    is16BitFrame = false;
-    lastFrameTime = millis();
-    break;
-
-  case 0x44:
-    // Legacy 24-bit frame from LMCSHD - auto-calculate panel count
-    numPanelsInFrame = (TOTAL_WIDTH / PANEL_WIDTH) * (TOTAL_HEIGHT / PANEL_HEIGHT);
-    currentCommand = 0xE0 | numPanelsInFrame;
-    totalFrameSize = (size_t)(TOTAL_WIDTH * TOTAL_HEIGHT);
-    streamExpect = totalFrameSize * 3;
-    streamPos = 0;
-    is16BitFrame = false;
-    is24BitFrame = true;
-    lastFrameTime = millis();
-    break;
-
-  case 0xC1:
-  case 0xC2:
-  case 0xC3:
-    // 16-bit multi-panel command - lower 4 bits = number of panels
-    numPanelsInFrame = cmd & 0x0F;
-    currentCommand = cmd;
-    totalFrameSize = (size_t)(PANEL_WIDTH * PANEL_HEIGHT * numPanelsInFrame);
-    streamExpect = totalFrameSize * 2;  // 16-bit = 2 bytes per pixel
-    streamPos = 0;
-    is16BitFrame = true;
-    lastFrameTime = millis();
-    break;
-
-  case 0x81:
-  case 0x82:
-  case 0x83:
-    // 8-bit multi-panel command - lower 4 bits = number of panels
-    numPanelsInFrame = cmd & 0x0F;
-    currentCommand = cmd;
-    totalFrameSize = (size_t)(PANEL_WIDTH * PANEL_HEIGHT * numPanelsInFrame);
-    streamExpect = totalFrameSize;  // 8-bit = 1 byte per pixel
-    streamPos = 0;
-    is16BitFrame = false;
-    lastFrameTime = millis();
-    break;
-
-  case 0xC4:
-    // 24-bit multi-panel command - lower 4 bits = number of panels
-    numPanelsInFrame = cmd & 0x0F;
-    currentCommand = cmd;
-    totalFrameSize = (size_t)(PANEL_WIDTH * PANEL_HEIGHT * numPanelsInFrame);
-    streamExpect = totalFrameSize * 3;  // 24-bit = 3 bytes per pixel
-    streamPos = 0;
-    is16BitFrame = false;
-    is24BitFrame = true;
-    lastFrameTime = millis();
-    break;
-
-  default:
-    break;
-  }
-}
-
-void processStreamFrame() {
-  frameCount++;
-  
-  size_t bytesPerPanel = PANEL_WIDTH * PANEL_HEIGHT * (is16BitFrame ? 2 : 1);
-  
-  // Check if this is multi-panel data that needs extraction and forwarding
-  bool isMultiPanelFrame = (numPanelsInFrame > 1);
-  
-  if (isMultiPanelFrame) {
-    // Extract this panel's data (first panel in the stream)
-    if (is16BitFrame) {
-      for (int y = 0; y < PANEL_HEIGHT; y++) {
-        int flippedY = PANEL_HEIGHT - 1 - y;
-        for (int x = 0; x < PANEL_WIDTH; x++) {
-          int srcIndex = flippedY * PANEL_WIDTH + x;
-          uint16_t* data16 = (uint16_t*)streamBuffer;
-          uint16_t pix = data16[srcIndex];
-          pix = ((pix & 0xFF) << 8) | ((pix & 0xFF00) >> 8);
-          
-          uint8_t r5 = (pix >> 11) & 0x1F;
-          uint8_t g6 = (pix >> 5) & 0x3F;
-          uint8_t b5 = pix & 0x1F;
-          
-          int16_t ledIndex = matrix->XY(x, y);
-          ledArray[ledIndex] = CRGB((r5 << 3) | (r5 >> 2), 
-                                     (g6 << 2) | (g6 >> 4), 
-                                     (b5 << 3) | (b5 >> 2));
-        }
-      }
-    } else if (is24BitFrame) {
-      for (int y = 0; y < PANEL_HEIGHT; y++) {
-        int flippedY = PANEL_HEIGHT - 1 - y;
-        for (int x = 0; x < PANEL_WIDTH; x++) {
-          int srcIndex = (flippedY * PANEL_WIDTH + x) * 3;
-          uint8_t r = streamBuffer[srcIndex];
-          uint8_t g = streamBuffer[srcIndex + 1];
-          uint8_t b = streamBuffer[srcIndex + 2];
-          
-          int16_t ledIndex = matrix->XY(x, y);
-          ledArray[ledIndex] = CRGB(r, g, b);
-        }
-      }
-    } else {
-      for (int y = 0; y < PANEL_HEIGHT; y++) {
-        int flippedY = PANEL_HEIGHT - 1 - y;
-        for (int x = 0; x < PANEL_WIDTH; x++) {
-          int srcIndex = flippedY * PANEL_WIDTH + x;
-          uint8_t v = streamBuffer[srcIndex];
-          
-          int16_t ledIndex = matrix->XY(x, y);
-          ledArray[ledIndex] = CRGB((v & 0xE0) | ((v & 0xE0) >> 3),
-                                     ((v & 0x1C) << 3) | ((v & 0x1C)),
-                                     ((v & 0x03) << 6) | ((v & 0x03) << 4) | ((v & 0x03) << 2) | (v & 0x03));
-        }
-      }
-    }
+  // Check if data is available on uart_in (UART_IN jack)
+  if (uart_in.available()) {
+    // Read header from the UART_IN
+    uint8_t header = uart_in.read();
+    Serial.print("Received header: 0x");
+    Serial.println(header, HEX);
     
-    // Forward remaining panel data to next panel
-    uint8_t nextHeader = (currentCommand & 0xF0) | (numPanelsInFrame - 1);
-    size_t remainingPanelBytes = bytesPerPanel * (numPanelsInFrame - 1);
-    
-    if (remainingPanelBytes > 0) {
-      uint8_t* forwardBuffer = (uint8_t*)malloc(remainingPanelBytes);
-      if (forwardBuffer) {
-        // Copy remaining panels' data
-        memcpy(forwardBuffer, streamBuffer + bytesPerPanel, remainingPanelBytes);
-        
-        Serial1.write(nextHeader);
-        Serial1.write(forwardBuffer, remainingPanelBytes);
-        free(forwardBuffer);
-      }
+    if (header == 0x05){
+      // If the header is 0x05, print the width and height of the LED matrix
+      Serial.print("INFO REQUEST: Display size = ");
+      Serial.print(TOTAL_WIDTH);
+      Serial.print("x");
+      Serial.println(TOTAL_HEIGHT);
+      uart_in.write(TOTAL_WIDTH);
+      uart_in.write(TOTAL_HEIGHT);
     }
-  } else {
-    // Single panel data - draw directly
-    if (is16BitFrame) {
-      DrawTheFrame16FromBuffer((uint16_t*)streamBuffer, ledArray);
-    } else if (is24BitFrame) {
-      DrawTheFrame24FromBuffer(streamBuffer, ledArray);
-    } else {
-      DrawTheFrame8FromBuffer(streamBuffer, ledArray);
+    else if (header == 0x42){
+      // Read the data from the UART_IN (16-bit single panel)
+      GetTheData16();
     }
-  }
-  
-  FastLED.show();
-  
-  dataReceived = true;
-  lastFrameTime = millis();  // Update for next frame
-}
-
-void processByte(uint8_t byte) {
-  if (streamExpect == 0) {
-    // This is a command byte - validate before processing
-    // Valid commands: 0x05, 0x42, 0x43, 0x81-0x83, 0xC1-0xC3
-    if (byte == 0x05 || byte == 0x42 || byte == 0x43 || 
-        byte == 0x81 || byte == 0x82 || byte == 0x83 ||
-        byte == 0xC1 || byte == 0xC2 || byte == 0xC3) {
-      handleCommand(byte);
-    } else {
-      // Invalid command byte - ignore to prevent desync
-      // This helps when Panel 1 starts mid-frame
+    else if (header == 0x43){
+      // Read the data from the UART_IN (8-bit single panel)
+      GetTheData8();
     }
-  } else {
-    // This is frame data
-    if (streamPos < streamExpect) {
-      streamBuffer[streamPos++] = byte;
-      
-      if (streamPos >= streamExpect) {
-        // Frame complete
-        processStreamFrame();
-        streamPos = 0;
-        streamExpect = 0;
-      }
-    } else {
-      // Buffer overflow protection - reset state
-      streamPos = 0;
-      streamExpect = 0;
+    else if (header == 0xC3 || header == 0xC2 || header == 0xC1){
+      // Set the number of panels and read the data from the UART_IN (16-bit multi-panel)
+      NUM_PANELS = header & 0x0F;
+      Serial.print("Multi-panel 16-bit mode, NUM_PANELS=");
+      Serial.println(NUM_PANELS);
+      GetTheData16();
     }
-  }
-}
-
-// Draw functions - render single panel data
-void DrawTheFrame16FromBuffer(uint16_t* data, CRGB* target){
-  for (int y = 0; y < PANEL_HEIGHT; y++) {
-    int flippedY = PANEL_HEIGHT - 1 - y;
-    for (int x = 0; x < PANEL_WIDTH; x++) {
-      // Data is for this single panel (48x48)
-      int srcIndex = flippedY * PANEL_WIDTH + x;
-      uint16_t pix = data[srcIndex];
-      // Swap bytes
-      pix = ((pix & 0xFF) << 8) | ((pix & 0xFF00) >> 8);
-      
-      uint8_t r5 = (pix >> 11) & 0x1F;
-      uint8_t g6 = (pix >> 5) & 0x3F;
-      uint8_t b5 = pix & 0x1F;
-      
-      int16_t ledIndex = matrix->XY(x, y);
-      target[ledIndex] = CRGB((r5 << 3) | (r5 >> 2), 
-                               (g6 << 2) | (g6 >> 4), 
-                               (b5 << 3) | (b5 >> 2));
-    }
-  }
-}
-
-void DrawTheFrame8FromBuffer(uint8_t* data, CRGB* target){
-  for (int y = 0; y < PANEL_HEIGHT; y++) {
-    int flippedY = PANEL_HEIGHT - 1 - y;
-    for (int x = 0; x < PANEL_WIDTH; x++) {
-      // Data is for this single panel (48x48)
-      int srcIndex = flippedY * PANEL_WIDTH + x;
-      uint8_t v = data[srcIndex];
-      
-      int16_t ledIndex = matrix->XY(x, y);
-      target[ledIndex] = CRGB((v & 0xE0) | ((v & 0xE0) >> 3),
-                               ((v & 0x1C) << 3) | ((v & 0x1C)),
-                               ((v & 0x03) << 6) | ((v & 0x03) << 4) | ((v & 0x03) << 2) | (v & 0x03));
-    }
-  }
-}
-
-void DrawTheFrame24FromBuffer(uint8_t* data, CRGB* target){
-  for (int y = 0; y < PANEL_HEIGHT; y++) {
-    int flippedY = PANEL_HEIGHT - 1 - y;
-    for (int x = 0; x < PANEL_WIDTH; x++) {
-      // Data is for this single panel (48x48)
-      int srcIndex = (flippedY * PANEL_WIDTH + x) * 3;
-      uint8_t r = data[srcIndex];
-      uint8_t g = data[srcIndex + 1];
-      uint8_t b = data[srcIndex + 2];
-      
-      int16_t ledIndex = matrix->XY(x, y);
-      target[ledIndex] = CRGB(r, g, b);
+    else if (header == 0x83 || header == 0x82 || header == 0x81){
+      // Set the number of panels and read the data from the UART_IN (8-bit multi-panel)
+      NUM_PANELS = header & 0x0F;
+      Serial.print("Multi-panel 8-bit mode, NUM_PANELS=");
+      Serial.println(NUM_PANELS);
+      GetTheData8();
     }
   }
 }
