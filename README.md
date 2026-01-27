@@ -1,7 +1,7 @@
 **MumuWall** 
 
 
-This is a giant modular LED wall made for gigs. Each panel comprises of 9 16x16 LED matrices arranged 3x3. The first minimum viable prouct is 2 panels high and 3 wide for use in an upcoming gig, with 3x3 and 3x4 to be worked on later.
+This is a giant modular LED wall made for displaying piaxelated visuals at gigs. Each panel comprises of 9 16x16 LED matrices arranged 3x3. The first minimum viable prouct is 2 panels high and 3 wide for use in an upcoming gig, with 3x3 and 3x4 to be worked on later.
 
 Each panel has a dedicated microcontroller.
 
