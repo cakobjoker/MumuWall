@@ -24,7 +24,7 @@ The control interface is a USB to 3.5mm audio jack from a PC to the first panel'
 3. Plug the 3 pin connector from the controller to the DIN on the bottom left matrix
 4. Connect the UART_OUT of the first controller to the next controller's UART_IN with male-male audio jack
 5. Repeat from each UART_OUT to the next panel's UART_IN
-6. Follow the numbering on the back of the panels, this snaking pattern:
+6. Follow this snaking pattern for any arrangement of panels (up first column, down the next, up the next, etc):
      * 3  4  9
      * 2  5  8
      * 1  6  7
